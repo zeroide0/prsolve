@@ -26,14 +26,16 @@ Patcher untuk **Adobe Premiere Pro 2026 (v26.x)** pada sistem operasi Windows x6
    - File target: `jpeg_wrapper.dll`
    - Fitur:
      - `Enable_ExtendedHardwareAcceleration`: Mengaktifkan flag kapabilitas akselerasi hardware pada kedua percabangan (`C7 84 24 34 01 00 00 00 00 00 00` -> `C7 84 24 34 01 00 00 01 00 00 00`).
-4. **HEVC Codec Provisioning (Solusi Blank Preview / Black Screen & Modal Codec)**
+4. **HEVC Codec Provisioning & Video Extension (Solusi Blank Preview / Black Screen & Frame Substitution)**
    - **MainConcept HEVC Decoder & Encoder Bundle**: Menyediakan `mc_dec_hevc.dll` dan `mc_enc_hevc.dll` yang dikemas dalam `hevc_codecs.zip`.
    - **Multi-Version Tier2 Deployment**: Otomatis mengekstrak dan memasang library ke `C:\Users\Public\Documents\AdobeInstalledCodecsTier2\4.3.4`, `4.3`, `4.0`, serta folder aplikasi Premiere Pro.
-   - **Auto-Download Fallback**: Jika dijalankan mandiri tanpa clone repository, skrip otomatis mengunduh bundle codec langsung dari repositori dengan retry mechanism.
+   - **Windows Media Foundation HEVC Video Extension (`Microsoft.HEVCVideoExtension_x64.appx`)**: Otomatis memasang ekstensi codec HEVC resmi Windows untuk `AVDecoderMFT`. Mengatasi error *"Frame substitution recursion attempt aborting"* dan layar hitam pada video rekaman OBS Studio (NVENC / `hvc1`).
+   - **Stale Media Cache Purging**: Membersihkan file cache `.ims` dan `.mcdb` lama di `AppData\Roaming\Adobe\Common\Media Cache Files` agar indeks decode yang sebelumnya rusak / gagal otomatis di-refresh dengan decoder baru.
+   - **Auto-Download Fallback**: Jika dijalankan mandiri tanpa clone repository, skrip otomatis mengunduh bundle codec dan appx langsung dari repositori dengan retry mechanism.
 5. **Anti-Popup & Genuine Protection (Solusi Issue Pop-up / 5 Hari Tersisa)**
    - **Windows Defender Firewall Outbound Rules**: Memblokir koneksi internet keluar untuk `Adobe Premiere Pro.exe` dan `PProHeadless.exe` agar background check tidak dapat menghubungi server Adobe.
    - **Hosts Protection**: Memblokir domain verifikasi cloud & telemetri lisensi Adobe (`prod.adobegenuine.com`, `genuine.adobe.com`, `lcs-cpc.adobe.io`, `workflow.licenses.adobe.com`, dll.) secara bersih di `C:\Windows\System32\drivers\etc\hosts`.
-   - **License Cache Cleanup**: Menghapus cache token & notifikasi kedaluwarsa lokal (`SLStore`, `OperatingEnvironment`, `OOBE\opgp`, file log) agar dialog peringatan yang tersimpan tidak muncul kembali.
+   - **License & Media Cache Cleanup**: Menghapus cache token & notifikasi kedaluwarsa lokal (`SLStore`, `OperatingEnvironment`, `OOBE\opgp`, file log) serta media cache yang korup agar dialog peringatan yang tersimpan tidak muncul kembali.
 
 ---
 

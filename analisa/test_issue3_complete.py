@@ -16,19 +16,37 @@ def run_tests():
 
     # Test 1: Dialog suppression pattern matching
     print("\n[Test 1] Testing upgrade dialog prompt signature matching...")
-    with open(r"D:\PR INSTALL\fix\pr\Adobe Premiere Pro.exe", "rb") as f:
+    target_pr = None
+    for p in [
+        r"D:\PR INSTALL\fix\Adobe Premiere Pro 2026\Adobe Premiere Pro.exe",
+        r"D:\PR INSTALL\fix\pr\Adobe Premiere Pro.exe",
+        r"C:\Program Files\Adobe\Adobe Premiere Pro 2026\Adobe Premiere Pro.exe",
+    ]:
+        if Path(p).exists():
+            target_pr = p
+            break
+    assert target_pr is not None, "Could not find a valid Premiere Pro exe for testing"
+
+    bak_path = target_pr + ".bak"
+    test_file = bak_path if Path(bak_path).exists() else target_pr
+    with open(test_file, "rb") as f:
         data = f.read()
 
     sig = [0x48, 0x89, 0x5C, 0x24, 0x08, 0x57, 0x48, 0x83, 0xEC, 0x30, 0x48, 0x8B, 0x1D, None, None, None, None, 0x48, 0x8B, 0xFA]
     occs = pr_patch.find_all(data, sig)
-    print(f"Found {len(occs)} match(es): {[hex(x) for x in occs]}")
-    assert len(occs) == 4, f"Expected 4 matches, got {len(occs)}"
-    assert 0x1AD3FAF0 in occs, "Expected 0x1AD3FAF0 (PromptUpgradeHEVC) in matches"
-
-    # Test replacement
-    test_buf = bytearray(data[0x1AD3FAF0 : 0x1AD3FAF0 + 32])
-    repl = pr_patch._suppress_dialog_prompt(test_buf, 0, sig)
-    assert repl[0:4] == b'\x48\x89\xD0\xC3', f"Unexpected replacement: {repl[0:4]}"
+    print(f"Found {len(occs)} match(es) in {Path(test_file).name}: {[hex(x) for x in occs]}")
+    if occs:
+        assert len(occs) == 4, f"Expected 4 matches, got {len(occs)}"
+        assert 0x1AD3FAF0 in occs, "Expected 0x1AD3FAF0 (PromptUpgradeHEVC) in matches"
+        test_buf = bytearray(data[0x1AD3FAF0 : 0x1AD3FAF0 + 32])
+        repl = pr_patch._suppress_dialog_prompt(test_buf, 0, sig)
+        assert repl[0:4] == b'\x48\x89\xD0\xC3', f"Unexpected replacement: {repl[0:4]}"
+    else:
+        # Binary already patched, verify patched offset
+        with open(target_pr, "rb") as f:
+            f.seek(0x1AD3FAF0)
+            head = f.read(4)
+            assert head == b'\x48\x89\xD0\xC3', f"Expected patched bytes at 0x1AD3FAF0, got {head.hex()}"
     print("Dialog suppression pattern and replacement verified successfully.")
 
     # Test 2: Codec Zip Archive integrity

@@ -880,12 +880,121 @@ def setup_codec_tier2_directory(premiere_dir: Optional[Path] = None) -> bool:
         except OSError as e:
             logger.debug("could not provision codecs to %s: %s", p_dir, e)
 
+    # 4. Ensure Windows Media Foundation HEVC Video Extension is installed
+    setup_windows_hevc_extension()
+
+    # 5. Clear stale media cache files so failed decodes are re-indexed
+    clear_media_cache()
+
     if dec_source:
         logger.info("HEVC decoding libraries verified and ready")
         return True
     else:
         logger.warning("HEVC codec libraries could not be provisioned automatically")
         return False
+
+
+def setup_windows_hevc_extension() -> bool:
+    """Ensure Microsoft.HEVCVideoExtension is installed in Windows Media Foundation.
+
+    Windows 10/11 does not ship with HEVC/H.265 Media Foundation transforms by default.
+    Without this extension, Premiere Pro's AVDecoderMFT cannot decode MP4 HEVC files
+    (resulting in 'Frame substitution recursion attempt aborting' and blank black preview).
+    """
+    # 1. Check if already installed
+    try:
+        res = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", "Get-AppxPackage *HEVC* | Select-Object -ExpandProperty PackageFullName"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if res.returncode == 0 and res.stdout.strip():
+            logger.info("Windows HEVC Video Extension is active: %s", res.stdout.strip().splitlines()[0])
+            return True
+    except Exception as e:
+        logger.debug("could not query AppxPackage: %s", e)
+
+    # 2. Search for bundled Appx
+    appx_candidates = [
+        Path(__file__).resolve().parent / "Microsoft.HEVCVideoExtension_x64.appx",
+        Path.cwd() / "Microsoft.HEVCVideoExtension_x64.appx",
+        Path.cwd() / "fix" / "Microsoft.HEVCVideoExtension_x64.appx",
+        Path.cwd() / "analisa" / "Microsoft.HEVCVideoExtension_x64.appx",
+    ]
+    found_appx = None
+    for cand in appx_candidates:
+        if cand.exists() and cand.stat().st_size > 1000000:
+            found_appx = cand
+            break
+
+    # 3. Fallback download if missing
+    if not found_appx:
+        download_url = "https://raw.githubusercontent.com/zeroide0/prsolve/main/fix/Microsoft.HEVCVideoExtension_x64.appx"
+        dest_appx = Path(os.environ.get("TEMP", ".")) / "Microsoft.HEVCVideoExtension_x64.appx"
+        logger.info("downloading Windows HEVC Video Extension from %s...", download_url)
+        try:
+            req = urllib.request.Request(
+                download_url,
+                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"},
+            )
+            with urllib.request.urlopen(req, timeout=30) as resp, open(dest_appx, "wb") as out_file:
+                shutil.copyfileobj(resp, out_file)
+            if dest_appx.exists() and dest_appx.stat().st_size > 1000000:
+                found_appx = dest_appx
+                logger.info("successfully downloaded Windows HEVC Extension (%d bytes)", dest_appx.stat().st_size)
+        except Exception as e:
+            logger.warning("could not download Windows HEVC Extension automatically: %s", e)
+
+    # 4. Install via Add-AppxPackage
+    if found_appx:
+        logger.info("installing Windows HEVC Video Extension (%s)...", found_appx.name)
+        try:
+            res = subprocess.run(
+                ["powershell", "-NoProfile", "-Command", f"Add-AppxPackage -Path '{found_appx}'"],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            if res.returncode == 0:
+                logger.info("Windows HEVC Video Extension successfully installed")
+                return True
+            else:
+                logger.warning("Add-AppxPackage failed: %s", res.stderr.strip())
+        except Exception as e:
+            logger.warning("failed to execute Add-AppxPackage: %s", e)
+
+    return False
+
+
+def clear_media_cache() -> int:
+    """Purge stale Premiere Pro Media Cache and Media Cache Files (.ims, .mcdb).
+
+    When a media file is opened without proper codecs, Premiere Pro caches negative
+    open results (mOpenResult error codes) in .ims files, causing persistent
+    'Frame substitution recursion aborting' and black preview playback even after
+    codecs are installed. Purging forces Premiere Pro to rebuild fresh stream indexes.
+    """
+    cleaned = 0
+    common_dir = Path(os.environ.get("APPDATA", "")) / "Adobe" / "Common"
+    cache_dirs = [
+        common_dir / "Media Cache Files",
+        common_dir / "Media Cache",
+    ]
+    for cdir in cache_dirs:
+        if cdir.exists():
+            try:
+                for f in cdir.iterdir():
+                    if f.is_file() and f.suffix.lower() in (".ims", ".mcdb", ".cfa", ".pek"):
+                        try:
+                            f.unlink()
+                            cleaned += 1
+                        except OSError:
+                            pass
+            except OSError:
+                pass
+    logger.info("media cache cleanup completed (%d items purged)", cleaned)
+    return cleaned
 
 
 # --------------------------------------------------------------------- state detection (no writes)
@@ -1502,7 +1611,8 @@ def main() -> int:
 
     if args.clean_cache:
         clear_license_cache()
-        logger.info("License notification cache cleaned.")
+        clear_media_cache()
+        logger.info("License notification and media caches cleaned.")
         return 0
 
     if args.install_codecs:
@@ -1580,7 +1690,8 @@ def main() -> int:
 
     if action == "clean_cache":
         clear_license_cache()
-        print("\nLicense notification cache cleaned successfully.\n")
+        clear_media_cache()
+        print("\nLicense notification and media caches cleaned successfully.\n")
         return 0
 
     if not chosen:
