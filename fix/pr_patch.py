@@ -43,6 +43,51 @@ SHELLOPEN_EXTENSION_KEYS = (
     r"Software\Classes\Premiere.Project\shell\open\command",
 )
 
+# Firewall rule names for outbound blocking
+FIREWALL_RULE_PREMIERE = "Block Adobe Premiere Pro Outbound (pr26win)"
+FIREWALL_RULE_HEADLESS = "Block Adobe Premiere Headless Outbound (pr26win)"
+
+# Hosts file path and markers
+HOSTS_FILE_PATH = Path(r"C:\Windows\System32\drivers\etc\hosts")
+HOSTS_HEADER = "# --- BEGIN pr26win Network Protection ---"
+HOSTS_FOOTER = "# --- END pr26win Network Protection ---"
+
+# Adobe cloud licensing and telemetry endpoints known to trigger genuine expiration modals
+ADOBE_GENUINE_DOMAINS = (
+    "prod.adobegenuine.com",
+    "genuine.adobe.com",
+    "lcs-cpc.adobe.io",
+    "lcs-robs.adobe.io",
+    "lcs-ulecs.adobe.io",
+    "cc-api-data.adobe.io",
+    "ic.adobe.io",
+    "gcos.adobe.io",
+    "hbc.adobe.io",
+    "fp.adobestats.io",
+    "crs.cr.adobe.com",
+    "workflow.licenses.adobe.com",
+    "workflow-stage.licenses.adobe.com",
+    "adobe.io",
+    "adobestats.io",
+    "ims-na1.adobelogin.com",
+    "ims-prod06.adobelogin.com",
+    "na1r.services.adobe.com",
+    "services.adobelogin.com",
+    "auth.services.adobe.com",
+    "oobe.adobe.com",
+    "adobeid-na1.services.adobe.com",
+    "edge.adobedc.net",
+    "license.adobe.com",
+    "licenses.adobe.com",
+    "7m31guub0q.adobe.io",
+    "7g2gzgk9g1.adobe.io",
+    "1hzopx6nz7.adobe.io",
+    "0mo5a70cqa.adobe.io",
+    "gw8gfjbs05.adobe.io",
+    "ij0gdyrfka.adobe.io",
+    "dyzt55url8.adobe.io",
+)
+
 # Pattern entry: int (0..255) for an exact byte, None for a single-byte wildcard.
 PatternByte = Optional[int]
 Pattern = Sequence[PatternByte]
@@ -500,6 +545,155 @@ def restore_jpeg(jpeg_path: str) -> None:
     logger.info("restored %s from %s", jpeg_path, bak)
 
 
+# --------------------------------------------------------------------- anti-popup & network protection
+
+def configure_firewall(premiere_path: Optional[str] = None,
+                       headless_path: Optional[str] = None,
+                       enable: bool = True) -> None:
+    """Add or remove Windows Defender Firewall outbound block rules for Premiere executables.
+
+    Prevents background online checks from receiving revocation / license expiration prompts.
+    """
+    targets = []
+    if premiere_path and Path(premiere_path).exists():
+        targets.append((FIREWALL_RULE_PREMIERE, premiere_path))
+    if headless_path and Path(headless_path).exists():
+        targets.append((FIREWALL_RULE_HEADLESS, headless_path))
+
+    for rule_name, exe_path in targets:
+        try:
+            subprocess.run(
+                ["netsh", "advfirewall", "firewall", "delete", "rule", f"name={rule_name}"],
+                capture_output=True,
+                text=True,
+            )
+        except OSError:
+            pass
+
+        if enable:
+            try:
+                cmd = [
+                    "netsh", "advfirewall", "firewall", "add", "rule",
+                    f"name={rule_name}",
+                    "dir=out",
+                    "action=block",
+                    f"program={exe_path}",
+                    "enable=yes",
+                    "profile=any",
+                    "description=Block Adobe Premiere Pro outbound telemetry calls (pr26win)",
+                ]
+                res = subprocess.run(cmd, capture_output=True, text=True)
+                if res.returncode == 0:
+                    logger.info("firewall outbound block added: %s (%s)", rule_name, exe_path)
+                else:
+                    logger.warning("could not add firewall rule %s: %s", rule_name,
+                                   res.stderr.strip() or res.stdout.strip())
+            except OSError as e:
+                logger.warning("failed to execute netsh for firewall rule %s: %s", rule_name, e)
+        else:
+            logger.info("firewall rule removed: %s", rule_name)
+
+
+def configure_hosts(enable: bool = True, hosts_path: Optional[Path] = None) -> None:
+    """Add or remove Adobe telemetry endpoints in the Windows hosts file."""
+    hp = hosts_path or HOSTS_FILE_PATH
+    if not hp.exists():
+        logger.warning("hosts file does not exist at %s, skipping hosts protection", hp)
+        return
+
+    bak_hosts = hp.with_name("hosts.pr26bak")
+    if enable and not bak_hosts.exists():
+        try:
+            shutil.copy(hp, bak_hosts)
+            logger.info("hosts backup written to %s", bak_hosts)
+        except OSError as e:
+            logger.warning("could not create hosts backup: %s", e)
+
+    try:
+        content = hp.read_text(encoding="utf-8", errors="ignore")
+    except OSError as e:
+        logger.warning("unable to read hosts file: %s", e)
+        return
+
+    if HOSTS_HEADER in content and HOSTS_FOOTER in content:
+        start_idx = content.find(HOSTS_HEADER)
+        end_idx = content.find(HOSTS_FOOTER) + len(HOSTS_FOOTER)
+        content = content[:start_idx].rstrip() + "\n" + content[end_idx:].lstrip()
+
+    if enable:
+        entries = [HOSTS_HEADER]
+        for d in sorted(ADOBE_GENUINE_DOMAINS):
+            entries.append(f"0.0.0.0 {d}")
+        entries.append(HOSTS_FOOTER)
+        new_content = content.rstrip() + "\n\n" + "\n".join(entries) + "\n"
+    else:
+        new_content = content.strip() + "\n"
+
+    try:
+        if os.name == "nt":
+            attrs = ctypes.windll.kernel32.GetFileAttributesW(str(hp))
+            file_attribute_readonly = 0x0001
+            if attrs != -1 and (attrs & file_attribute_readonly):
+                ctypes.windll.kernel32.SetFileAttributesW(str(hp), attrs & ~file_attribute_readonly)
+
+        hp.write_text(new_content, encoding="utf-8")
+        if enable:
+            logger.info("configured %d domains in hosts file (%s)", len(ADOBE_GENUINE_DOMAINS), hp)
+        else:
+            logger.info("removed hosts protection block from %s", hp)
+    except OSError as e:
+        logger.warning("failed to write hosts file: %s (run as Administrator)", e)
+
+
+def clear_license_cache() -> None:
+    """Clear stale Adobe licensing notification and Genuine Service caches.
+
+    Removes cached warning flags so that countdown / Terms of Use dialogs do not persist.
+    """
+    cleaned = 0
+    cache_dirs = []
+
+    local_app_data = os.environ.get("LOCALAPPDATA")
+    if local_app_data:
+        cache_dirs.append(Path(local_app_data) / "Adobe" / "OOBE" / "opgp")
+        cache_dirs.append(Path(local_app_data) / "Adobe" / "NGL")
+
+    prog_data = os.environ.get("ProgramData", r"C:\ProgramData")
+    if prog_data:
+        cache_dirs.append(Path(prog_data) / "Adobe" / "OperatingEnvironment")
+        cache_dirs.append(Path(prog_data) / "Adobe" / "SLStore")
+        cache_dirs.append(Path(prog_data) / "Adobe" / "NGL")
+
+    for cdir in cache_dirs:
+        if cdir.exists():
+            try:
+                if cdir.is_dir():
+                    shutil.rmtree(cdir, ignore_errors=True)
+                else:
+                    cdir.unlink(missing_ok=True)
+                logger.info("cleaned cache path: %s", cdir)
+                cleaned += 1
+            except OSError as e:
+                logger.debug("could not remove cache %s: %s", cdir, e)
+
+    app_data = os.environ.get("APPDATA")
+    search_dirs = [d for d in [local_app_data, app_data] if d]
+    for base in search_dirs:
+        adobe_dir = Path(base) / "Adobe"
+        if adobe_dir.exists():
+            try:
+                for log_file in adobe_dir.rglob("gude*.log"):
+                    try:
+                        log_file.unlink()
+                        cleaned += 1
+                    except OSError:
+                        pass
+            except OSError:
+                pass
+
+    logger.info("license cache cleanup completed (%d items processed)", cleaned)
+
+
 # --------------------------------------------------------------------- state detection (no writes)
 
 def state_of_premiere(premiere_path: str) -> str:
@@ -573,12 +767,20 @@ def _path_from_registry() -> Optional[str]:
 
 
 def locate() -> str:
-    """Find Adobe Premiere Pro.exe via workspace folder, registry, or standard paths."""
-    # 1. Local workspace directory relative check
-    workspace_pr = Path(r"D:\PR INSTALL\prsolved\pr\Adobe Premiere Pro.exe")
-    if workspace_pr.exists():
-        logger.info("Premiere Pro found in local pr folder: %s", workspace_pr)
-        return str(workspace_pr)
+    """Find Adobe Premiere Pro.exe via local relative paths, registry, or standard paths."""
+    # 1. Local workspace / relative check
+    script_dir = Path(__file__).resolve().parent
+    candidates = [
+        script_dir / "Adobe Premiere Pro.exe",
+        script_dir / "pr" / "Adobe Premiere Pro.exe",
+        script_dir.parent / "pr" / "Adobe Premiere Pro.exe",
+        Path.cwd() / "Adobe Premiere Pro.exe",
+        Path.cwd() / "pr" / "Adobe Premiere Pro.exe",
+    ]
+    for cand in candidates:
+        if cand.exists():
+            logger.info("Premiere Pro found in local path: %s", cand)
+            return str(cand)
 
     # 2. Registry lookup
     reg_path = _path_from_registry()
@@ -600,6 +802,17 @@ def locate_headless(premiere_path: Optional[str] = None) -> list:
         p = Path(premiere_path).with_name("PProHeadless.exe")
         if p.exists():
             paths.append(str(p))
+    script_dir = Path(__file__).resolve().parent
+    candidates = [
+        script_dir / "PProHeadless.exe",
+        script_dir / "pr" / "PProHeadless.exe",
+        script_dir.parent / "pr" / "PProHeadless.exe",
+        Path.cwd() / "PProHeadless.exe",
+        Path.cwd() / "pr" / "PProHeadless.exe",
+    ]
+    for cand in candidates:
+        if cand.exists() and str(cand) not in paths:
+            paths.append(str(cand))
     for dp in DEFAULT_HEADLESS_PATHS:
         if Path(dp).exists() and dp not in paths:
             paths.append(dp)
@@ -613,6 +826,17 @@ def locate_jpeg(premiere_path: Optional[str] = None) -> list:
         p = Path(premiere_path).with_name("jpeg_wrapper.dll")
         if p.exists():
             paths.append(str(p))
+    script_dir = Path(__file__).resolve().parent
+    candidates = [
+        script_dir / "jpeg_wrapper.dll",
+        script_dir / "pr" / "jpeg_wrapper.dll",
+        script_dir.parent / "pr" / "jpeg_wrapper.dll",
+        Path.cwd() / "jpeg_wrapper.dll",
+        Path.cwd() / "pr" / "jpeg_wrapper.dll",
+    ]
+    for cand in candidates:
+        if cand.exists() and str(cand) not in paths:
+            paths.append(str(cand))
     for dp in DEFAULT_JPEG_PATHS:
         if Path(dp).exists() and dp not in paths:
             paths.append(dp)
@@ -628,6 +852,10 @@ def _kill_premiere() -> bool:
         "dynamiclinkmanager.exe",
         "TeamProjectsLocalHub.exe",
         "dvaapprelauncher.exe",
+        "AdobeGCClient.exe",
+        "AdobeNotificationClient.exe",
+        "AGSService.exe",
+        "AGMService.exe",
     )
     for img in targets:
         try:
@@ -659,6 +887,14 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         "If omitted on a TTY, an interactive menu is shown instead.")
     p.add_argument("--skip-admin", action="store_true",
                    help="skip Administrator check (for sandbox/user directories)")
+    p.add_argument("--block-network", action="store_true",
+                   help="configure firewall rules and hosts entries to block genuine popups")
+    p.add_argument("--unblock-network", action="store_true",
+                   help="remove firewall rules and hosts entries")
+    p.add_argument("--clean-cache", action="store_true",
+                   help="clean stale Adobe licensing/genuine notification caches")
+    p.add_argument("--no-network-block", action="store_true",
+                   help="skip automatic firewall/hosts blocking when patching")
     return p
 
 
@@ -862,14 +1098,28 @@ def interactive_menu(premiere_path: Optional[str],
     if action_filter is None:
         idx = _arrow_single_select(
             header="\nWhat do you want to do?",
-            options=["Patch installed targets",
-                     "Restore from .bak",
-                     "Quit"],
+            options=[
+                "Patch installed targets (with anti-popup protection)",
+                "Restore from .bak (and remove popup protection)",
+                "Configure Anti-Popup Protection (Firewall & Hosts)",
+                "Remove Anti-Popup Protection",
+                "Clean License Notification Cache",
+                "Quit",
+            ],
             footer="(Up/Down to move, Enter to confirm, q/Esc to cancel)",
         )
-        if idx is None or idx == 2:
+        if idx is None or idx == 5:
             return None, []
-        action = "patch" if idx == 0 else "restore"
+        if idx == 0:
+            action = "patch"
+        elif idx == 1:
+            action = "restore"
+        elif idx == 2:
+            return "block_network", []
+        elif idx == 3:
+            return "unblock_network", []
+        elif idx == 4:
+            return "clean_cache", []
     else:
         action = action_filter
 
@@ -925,7 +1175,12 @@ def interactive_menu(premiere_path: Optional[str],
     return action, chosen
 
 
-def _execute(action: str, chosen: "list[tuple[str, str]]") -> int:
+def _execute(
+    action: str,
+    chosen: "list[tuple[str, str]]",
+    skip_network_block: bool = False,
+    premiere_path: Optional[str] = None,
+) -> int:
     rc = 0
     _kill_premiere()
 
@@ -962,6 +1217,34 @@ def _execute(action: str, chosen: "list[tuple[str, str]]") -> int:
             logger.error("Target failed (%s): %s", path, e)
             rc = 1
 
+    # Network protection & cache handling
+    if not skip_network_block:
+        pr_exe = None
+        hl_exe = None
+        for k, p in chosen:
+            if k == "premiere":
+                pr_exe = p
+            elif k == "headless":
+                hl_exe = p
+        if not pr_exe and premiere_path:
+            pr_exe = premiere_path
+        if not hl_exe and pr_exe:
+            cand = Path(pr_exe).with_name("PProHeadless.exe")
+            if cand.exists():
+                hl_exe = str(cand)
+
+        if action == "patch":
+            logger.info("applying anti-popup protection (firewall & hosts)...")
+            configure_firewall(pr_exe, hl_exe, enable=True)
+            configure_hosts(enable=True)
+            clear_license_cache()
+            logger.info("anti-popup protection active")
+        elif action == "restore":
+            logger.info("reverting anti-popup protection...")
+            configure_firewall(pr_exe, hl_exe, enable=False)
+            configure_hosts(enable=False)
+            logger.info("anti-popup protection removed")
+
     return rc
 
 
@@ -993,6 +1276,31 @@ def main() -> int:
     except PatchError:
         premiere_path = None
 
+    # Handle dedicated CLI commands directly
+    if args.block_network:
+        _kill_premiere()
+        headless_paths = locate_headless(premiere_path)
+        hl = headless_paths[0] if headless_paths else None
+        configure_firewall(premiere_path, hl, enable=True)
+        configure_hosts(enable=True)
+        clear_license_cache()
+        logger.info("Anti-popup protection successfully configured.")
+        return 0
+
+    if args.unblock_network:
+        _kill_premiere()
+        headless_paths = locate_headless(premiere_path)
+        hl = headless_paths[0] if headless_paths else None
+        configure_firewall(premiere_path, hl, enable=False)
+        configure_hosts(enable=False)
+        logger.info("Anti-popup protection successfully removed.")
+        return 0
+
+    if args.clean_cache:
+        clear_license_cache()
+        logger.info("License notification cache cleaned.")
+        return 0
+
     # ---- explicit CLI mode (scripted / unattended) --------------------------
     if args.targets is not None or not sys.stdin.isatty():
         targets_spec = args.targets or "all"
@@ -1001,7 +1309,7 @@ def main() -> int:
             logger.info("nothing to do (no targets resolved)")
             return 0
         action = "restore" if args.restore else "patch"
-        return _execute(action, chosen)
+        return _execute(action, chosen, skip_network_block=args.no_network_block, premiere_path=premiere_path)
 
     # ---- interactive flow ---------------------------------------------------
     if args.restore:
@@ -1026,15 +1334,43 @@ def main() -> int:
             if confirm_idx != 0:
                 print("\nCancelled.\n")
                 return 0
-            return _execute("restore", [(kind, path)])
+            return _execute("restore", [(kind, path)], skip_network_block=args.no_network_block, premiere_path=premiere_path)
 
         action, chosen = interactive_menu(premiere_path, action_filter="restore")
     else:
         action, chosen = interactive_menu(premiere_path, action_filter=None)
 
-    if action is None or not chosen:
+    if action is None:
         return 0
-    return _execute(action, chosen)
+
+    if action == "block_network":
+        _kill_premiere()
+        headless_paths = locate_headless(premiere_path)
+        hl = headless_paths[0] if headless_paths else None
+        configure_firewall(premiere_path, hl, enable=True)
+        configure_hosts(enable=True)
+        clear_license_cache()
+        print("\nAnti-popup protection applied successfully.\n")
+        return 0
+
+    if action == "unblock_network":
+        _kill_premiere()
+        headless_paths = locate_headless(premiere_path)
+        hl = headless_paths[0] if headless_paths else None
+        configure_firewall(premiere_path, hl, enable=False)
+        configure_hosts(enable=False)
+        print("\nAnti-popup protection removed.\n")
+        return 0
+
+    if action == "clean_cache":
+        clear_license_cache()
+        print("\nLicense notification cache cleaned successfully.\n")
+        return 0
+
+    if not chosen:
+        return 0
+
+    return _execute(action, chosen, skip_network_block=args.no_network_block, premiere_path=premiere_path)
 
 
 if __name__ == "__main__":

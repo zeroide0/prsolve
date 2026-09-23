@@ -23,6 +23,10 @@ Patcher untuk **Adobe Premiere Pro 2026 (v26.x)** pada sistem operasi Windows x6
    - File target: `jpeg_wrapper.dll`
    - Fitur:
      - `Enable_ExtendedHardwareAcceleration`: Mengaktifkan flag kapabilitas akselerasi hardware pada kedua percabangan (`C7 84 24 34 01 00 00 00 00 00 00` -> `C7 84 24 34 01 00 00 01 00 00 00`).
+4. **Anti-Popup & Genuine Protection (Solusi Issue Pop-up / 5 Hari Tersisa)**
+   - **Windows Defender Firewall Outbound Rules**: Memblokir koneksi internet keluar untuk `Adobe Premiere Pro.exe` dan `PProHeadless.exe` agar background check tidak dapat menghubungi server Adobe.
+   - **Hosts Protection**: Memblokir domain verifikasi cloud & telemetri lisensi Adobe (`prod.adobegenuine.com`, `genuine.adobe.com`, `lcs-cpc.adobe.io`, `workflow.licenses.adobe.com`, dll.) secara bersih di `C:\Windows\System32\drivers\etc\hosts`.
+   - **License Cache Cleanup**: Menghapus cache token & notifikasi kedaluwarsa lokal (`SLStore`, `OperatingEnvironment`, `OOBE\opgp`, file log) agar dialog peringatan yang tersimpan tidak muncul kembali.
 
 ---
 
@@ -32,8 +36,10 @@ Patcher untuk **Adobe Premiere Pro 2026 (v26.x)** pada sistem operasi Windows x6
 - **Atomic File Write with Retry**: Penulisan file aman melalui file `.new` dan `os.replace` dengan 5 kali percobaan retry jika terkunci sementara oleh AV/Explorer (`_atomic_write_with_retry`).
 - **Backup & Restore Otomatis**: Membuat file `.bak` otomatis sebelum melakukan perubahan. Saat restore, versi PE divalidasi agar tidak terjadi *downgrade*.
 - **Deteksi Status (Read-Only)**: Mengecek apakah status binary adalah `MISSING`, `UNSUPPORTED`, `UNPATCHED`, atau `PATCHED` tanpa memodifikasi file.
+- **Perlindungan Jaringan Anti-Popup Otomatis**: Secara otomatis mengaktifkan aturan firewall dan blokir hosts saat melakukan patch, serta mencopotnya saat restore.
+- **Pencarian Path Portable**: Mendukung pencarian dinamis di direktori lokal workspace, registry Windows, maupun default path sistem.
 - **Interactive Terminal UI**: Navigasi arrow key menggunakan `msvcrt` dan ANSI escape sequence (single-select & multi-select dengan toggle Spasi dan shortcut konfirmasi Enter / batal Esc).
-- **Unattended CLI Execution**: Mendukung flag CLI (`--targets`, `--path`, `--restore`, `--skip-admin`) untuk scripting dan mode non-TTY.
+- **Unattended CLI Execution**: Mendukung flag CLI (`--targets`, `--path`, `--restore`, `--block-network`, `--unblock-network`, `--clean-cache`, `--skip-admin`) untuk scripting dan mode non-TTY.
 
 ---
 
@@ -54,7 +60,8 @@ Kontrol Menu:
 - `Esc` / `q`   : Keluar / Batal
 
 ### 2. Mode Perintah (CLI / Otomatis)
-Patch semua target:
+
+Patch semua target sekaligus mengaktifkan Anti-Popup Protection:
 ```powershell
 & .\venv\Scripts\python.exe .\fix\pr_patch.py --targets all
 ```
@@ -64,12 +71,22 @@ Patch target spesifik:
 & .\venv\Scripts\python.exe .\fix\pr_patch.py --targets premiere,jpeg
 ```
 
-Tentukan path instalasi kustom:
+Konfigurasi perlindungan Anti-Popup saja (Firewall + Hosts + Cache Cleanup):
 ```powershell
-& .\venv\Scripts\python.exe .\fix\pr_patch.py --path "D:\PR INSTALL\prsolved\pr\Adobe Premiere Pro.exe" --targets all
+& .\venv\Scripts\python.exe .\fix\pr_patch.py --block-network
 ```
 
-Restore kembali binary original dari `.bak`:
+Membersihkan cache lisensi / notifikasi pop-up:
+```powershell
+& .\venv\Scripts\python.exe .\fix\pr_patch.py --clean-cache
+```
+
+Mencopot aturan Anti-Popup (unblock firewall & hosts):
+```powershell
+& .\venv\Scripts\python.exe .\fix\pr_patch.py --unblock-network
+```
+
+Restore kembali binary original dari `.bak` (dan mencopot proteksi popup):
 ```powershell
 & .\venv\Scripts\python.exe .\fix\pr_patch.py --restore --targets all
 ```
