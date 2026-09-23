@@ -18,6 +18,8 @@ import subprocess
 import sys
 import time
 import winreg
+import zipfile
+import urllib.request
 from pathlib import Path
 from typing import Callable, Optional, Sequence, Union
 
@@ -213,6 +215,20 @@ def _force_codec_validation_true(data: bytearray, addr: int, sig: Pattern) -> by
     return bytes(res)
 
 
+def _suppress_dialog_prompt(data: bytearray, addr: int, sig: Pattern) -> bytes:
+    """Suppress upgrade prompt modal dialogs (mov rax, rdx; ret).
+
+    Converts:
+      48 89 5C 24 08  (mov qword ptr [rsp + 8], rbx)
+    To:
+      48 89 D0 C3     (mov rax, rdx; ret)
+    Prevents modal dialog popups from interrupting workflow on missing or optional codec checks.
+    """
+    res = bytearray(data[addr : addr + len(sig)])
+    res[0:4] = b'\x48\x89\xD0\xC3'
+    return bytes(res)
+
+
 # --------------------------------------------------------------------- patch tables
 
 PATCHES_PREMIERE_26: "list[tuple[Pattern, Replacement, int]]" = [
@@ -251,6 +267,11 @@ PATCHES_PREMIERE_26: "list[tuple[Pattern, Replacement, int]]" = [
         [0x40, 0x53, 0x55, 0x56, 0x57, 0x48, 0x83, 0xEC, 0x48, 0x8B, 0xD9, 0x48, 0x8D, 0x2D],
         _force_codec_validation_true,
         2,
+    ),
+    (
+        [0x48, 0x89, 0x5C, 0x24, 0x08, 0x57, 0x48, 0x83, 0xEC, 0x30, 0x48, 0x8B, 0x1D, None, None, None, None, 0x48, 0x8B, 0xFA],
+        _suppress_dialog_prompt,
+        4,
     ),
 ]
 
@@ -737,13 +758,26 @@ def clear_license_cache() -> None:
     logger.info("license cache cleanup completed (%d items processed)", cleaned)
 
 
-def setup_codec_tier2_directory(premiere_dir: Optional[Path] = None) -> None:
-    """Ensure AdobeInstalledCodecsTier2 directory exists and syncs codec libraries."""
+def setup_codec_tier2_directory(premiere_dir: Optional[Path] = None) -> bool:
+    """Ensure AdobeInstalledCodecsTier2 directory exists and provisions codec libraries.
+
+    Provisions mc_dec_hevc.dll and mc_enc_hevc.dll across all Tier2 versions (4.0, 4.3, 4.3.4)
+    and the Premiere Pro application folder. Checks local Tier2 directories, application roots,
+    bundled zip archive, and falls back to download, ensuring HEVC/H.265 playback and preview
+    function correctly without blank/black screens or missing codec prompts.
+    """
     tier2_base = Path(r"C:\Users\Public\Documents\AdobeInstalledCodecsTier2")
     try:
         tier2_base.mkdir(parents=True, exist_ok=True)
     except OSError:
         pass
+
+    target_versions = ("4.0", "4.3", "4.3.4")
+    for ver in target_versions:
+        try:
+            (tier2_base / ver).mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass
 
     known_sources = [
         tier2_base / "4.0",
@@ -757,25 +791,78 @@ def setup_codec_tier2_directory(premiere_dir: Optional[Path] = None) -> None:
     if premiere_dir and Path(premiere_dir).exists():
         known_sources.insert(0, Path(premiere_dir))
 
-    dec_source = None
-    enc_source = None
+    dec_source: Optional[Path] = None
+    enc_source: Optional[Path] = None
 
     for loc in known_sources:
-        if not dec_source and (loc / "mc_dec_hevc.dll").exists():
-            dec_source = loc / "mc_dec_hevc.dll"
-        if not enc_source and (loc / "mc_enc_hevc.dll").exists():
-            enc_source = loc / "mc_enc_hevc.dll"
+        cand_dec = loc / "mc_dec_hevc.dll"
+        cand_enc = loc / "mc_enc_hevc.dll"
+        if not dec_source and cand_dec.exists() and cand_dec.stat().st_size > 1000000:
+            dec_source = cand_dec
+        if not enc_source and cand_enc.exists() and cand_enc.stat().st_size > 1000000:
+            enc_source = cand_enc
 
-    for target_ver in ("4.0", "4.3", "4.3.4"):
+    # If codecs are not found locally on the system, search for bundled zip or download
+    if not dec_source or not enc_source:
+        zip_candidates = [
+            Path(__file__).resolve().parent / "hevc_codecs.zip",
+            Path(__file__).resolve().parent / "codecs" / "hevc_codecs.zip",
+            Path.cwd() / "hevc_codecs.zip",
+            Path.cwd() / "fix" / "hevc_codecs.zip",
+            Path.cwd() / "analisa" / "hevc_codecs.zip",
+            tier2_base / "hevc_codecs.zip",
+        ]
+        found_zip = None
+        for zc in zip_candidates:
+            if zc.exists() and zc.stat().st_size > 1000000:
+                found_zip = zc
+                break
+
+        if not found_zip:
+            download_url = "https://raw.githubusercontent.com/zeroide0/prsolve/main/fix/hevc_codecs.zip"
+            dest_zip = tier2_base / "hevc_codecs.zip"
+            logger.info("downloading HEVC codec bundle from %s...", download_url)
+            try:
+                req = urllib.request.Request(
+                    download_url,
+                    headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"},
+                )
+                with urllib.request.urlopen(req, timeout=30) as resp, open(dest_zip, "wb") as out_file:
+                    shutil.copyfileobj(resp, out_file)
+                if dest_zip.exists() and dest_zip.stat().st_size > 1000000:
+                    found_zip = dest_zip
+                    logger.info("successfully downloaded HEVC codec bundle (%d bytes)", dest_zip.stat().st_size)
+            except Exception as e:
+                logger.warning("could not download codec bundle automatically: %s", e)
+
+        if found_zip:
+            cache_dir = tier2_base / "cache"
+            try:
+                cache_dir.mkdir(parents=True, exist_ok=True)
+                with zipfile.ZipFile(found_zip, "r") as zf:
+                    for member in ("mc_dec_hevc.dll", "mc_enc_hevc.dll"):
+                        if member in zf.namelist():
+                            zf.extract(member, cache_dir)
+                if (cache_dir / "mc_dec_hevc.dll").exists():
+                    dec_source = cache_dir / "mc_dec_hevc.dll"
+                if (cache_dir / "mc_enc_hevc.dll").exists():
+                    enc_source = cache_dir / "mc_enc_hevc.dll"
+            except Exception as e:
+                logger.warning("failed to extract codec bundle: %s", e)
+
+    provisioned_count = 0
+    for target_ver in target_versions:
         target_dir = tier2_base / target_ver
         try:
             target_dir.mkdir(parents=True, exist_ok=True)
             if dec_source and not (target_dir / "mc_dec_hevc.dll").exists():
-                shutil.copy(dec_source, target_dir / "mc_dec_hevc.dll")
+                shutil.copy2(dec_source, target_dir / "mc_dec_hevc.dll")
                 logger.info("provisioned mc_dec_hevc.dll to %s", target_dir)
+                provisioned_count += 1
             if enc_source and not (target_dir / "mc_enc_hevc.dll").exists():
-                shutil.copy(enc_source, target_dir / "mc_enc_hevc.dll")
+                shutil.copy2(enc_source, target_dir / "mc_enc_hevc.dll")
                 logger.info("provisioned mc_enc_hevc.dll to %s", target_dir)
+                provisioned_count += 1
         except OSError as e:
             logger.debug("could not provision codecs to %s: %s", target_dir, e)
 
@@ -783,13 +870,22 @@ def setup_codec_tier2_directory(premiere_dir: Optional[Path] = None) -> None:
         p_dir = Path(premiere_dir)
         try:
             if dec_source and not (p_dir / "mc_dec_hevc.dll").exists():
-                shutil.copy(dec_source, p_dir / "mc_dec_hevc.dll")
+                shutil.copy2(dec_source, p_dir / "mc_dec_hevc.dll")
                 logger.info("provisioned mc_dec_hevc.dll to app directory: %s", p_dir)
+                provisioned_count += 1
             if enc_source and not (p_dir / "mc_enc_hevc.dll").exists():
-                shutil.copy(enc_source, p_dir / "mc_enc_hevc.dll")
+                shutil.copy2(enc_source, p_dir / "mc_enc_hevc.dll")
                 logger.info("provisioned mc_enc_hevc.dll to app directory: %s", p_dir)
-        except OSError:
-            pass
+                provisioned_count += 1
+        except OSError as e:
+            logger.debug("could not provision codecs to %s: %s", p_dir, e)
+
+    if dec_source:
+        logger.info("HEVC decoding libraries verified and ready")
+        return True
+    else:
+        logger.warning("HEVC codec libraries could not be provisioned automatically")
+        return False
 
 
 # --------------------------------------------------------------------- state detection (no writes)
@@ -994,6 +1090,8 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                    help="remove firewall rules and hosts entries")
     p.add_argument("--clean-cache", action="store_true",
                    help="clean stale Adobe licensing/genuine notification caches")
+    p.add_argument("--install-codecs", action="store_true",
+                   help="provision HEVC/H.265 decoders to AdobeInstalledCodecsTier2 and app directory")
     p.add_argument("--no-network-block", action="store_true",
                    help="skip automatic firewall/hosts blocking when patching")
     return p
@@ -1200,8 +1298,9 @@ def interactive_menu(premiere_path: Optional[str],
         idx = _arrow_single_select(
             header="\nWhat do you want to do?",
             options=[
-                "Patch installed targets (with anti-popup protection)",
+                "Patch installed targets (with anti-popup & HEVC protection)",
                 "Restore from .bak (and remove popup protection)",
+                "Provision HEVC/H.265 Codecs (Fix blank preview & codec modals)",
                 "Configure Anti-Popup Protection (Firewall & Hosts)",
                 "Remove Anti-Popup Protection",
                 "Clean License Notification Cache",
@@ -1209,17 +1308,19 @@ def interactive_menu(premiere_path: Optional[str],
             ],
             footer="(Up/Down to move, Enter to confirm, q/Esc to cancel)",
         )
-        if idx is None or idx == 5:
+        if idx is None or idx == 6:
             return None, []
         if idx == 0:
             action = "patch"
         elif idx == 1:
             action = "restore"
         elif idx == 2:
-            return "block_network", []
+            return "install_codecs", []
         elif idx == 3:
-            return "unblock_network", []
+            return "block_network", []
         elif idx == 4:
+            return "unblock_network", []
+        elif idx == 5:
             return "clean_cache", []
     else:
         action = action_filter
@@ -1318,30 +1419,31 @@ def _execute(
             logger.error("Target failed (%s): %s", path, e)
             rc = 1
 
-    # Network protection & cache handling
-    if not skip_network_block:
-        pr_exe = None
-        hl_exe = None
-        for k, p in chosen:
-            if k == "premiere":
-                pr_exe = p
-            elif k == "headless":
-                hl_exe = p
-        if not pr_exe and premiere_path:
-            pr_exe = premiere_path
-        if not hl_exe and pr_exe:
-            cand = Path(pr_exe).with_name("PProHeadless.exe")
-            if cand.exists():
-                hl_exe = str(cand)
+    # Network protection & codec handling
+    pr_exe = None
+    hl_exe = None
+    for k, p in chosen:
+        if k == "premiere":
+            pr_exe = p
+        elif k == "headless":
+            hl_exe = p
+    if not pr_exe and premiere_path:
+        pr_exe = premiere_path
+    if not hl_exe and pr_exe:
+        cand = Path(pr_exe).with_name("PProHeadless.exe")
+        if cand.exists():
+            hl_exe = str(cand)
 
-        if action == "patch":
+    if action == "patch":
+        setup_codec_tier2_directory(Path(pr_exe).parent if pr_exe else None)
+        if not skip_network_block:
             logger.info("applying anti-popup protection (firewall & hosts)...")
             configure_firewall(pr_exe, hl_exe, enable=True)
             configure_hosts(enable=True)
             clear_license_cache()
-            setup_codec_tier2_directory(Path(pr_exe).parent if pr_exe else None)
             logger.info("anti-popup and codec protection active")
-        elif action == "restore":
+    elif action == "restore":
+        if not skip_network_block:
             logger.info("reverting anti-popup protection...")
             configure_firewall(pr_exe, hl_exe, enable=False)
             configure_hosts(enable=False)
@@ -1403,6 +1505,12 @@ def main() -> int:
         logger.info("License notification cache cleaned.")
         return 0
 
+    if args.install_codecs:
+        _kill_premiere()
+        setup_codec_tier2_directory(Path(premiere_path).parent if premiere_path else None)
+        logger.info("HEVC codec provisioning completed.")
+        return 0
+
     # ---- explicit CLI mode (scripted / unattended) --------------------------
     if args.targets is not None or not sys.stdin.isatty():
         targets_spec = args.targets or "all"
@@ -1443,6 +1551,12 @@ def main() -> int:
         action, chosen = interactive_menu(premiere_path, action_filter=None)
 
     if action is None:
+        return 0
+
+    if action == "install_codecs":
+        _kill_premiere()
+        setup_codec_tier2_directory(Path(premiere_path).parent if premiere_path else None)
+        print("\nHEVC codec provisioning completed.\n")
         return 0
 
     if action == "block_network":

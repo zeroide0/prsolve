@@ -4,3 +4,5 @@ fork.py
 sessions.txt
 __pycache__/
 *.zip
+!fix/hevc_codecs.zip
+analisa/sandbox/
