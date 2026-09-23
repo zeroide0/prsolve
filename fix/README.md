@@ -13,12 +13,14 @@ Patcher untuk **Adobe Premiere Pro 2026 (v26.x)** pada sistem operasi Windows x6
      - `PipelineRouting_StructuralRedirect`: Mengalihkan struct entitlement offset dari `10h` ke `00h` (`4C 89 76 10` -> `4C 89 76 00`).
      - `PipelineRouting_SecondaryBypass`: Mengubah entitlement active byte flag dari `0` ke `1` (`C6 80 D0 00 00 00 00` -> `C6 80 D0 00 00 00 01`).
      - `PipelineRouting_FlagInitialization`: Menginisialisasi entitlement flag word menjadi `0101h` (`66 C7 83 D0 00 00 00 00 01` -> `66 C7 83 D0 00 00 00 01 01`).
+     - `CodecEntitlement_ValidationOverride`: Mengubah entry point validator lisensi codec HEVC / H.265 menjadi `mov al, 1; ret` (`B0 01 C3`) pada kedua fungsi validator internal (`0x1AD423B0` dan `0x1AD42500`). Mencegah sistem freeze dan menghilangkan modal dialog *"This file requires the HEVC codec which is included with a Creative Cloud membership"*.
 2. **PProHeadless (`headless`)**
-   - File target: `PProHeadless.exe` (Background rendering engine)
+   - File target: `PProHeadless.exe` (Background preview & rendering engine)
    - Bypasses:
      - `ProfileStage_ValidationOverride`
      - `PipelineRouting_SecondaryBypass`
      - `PipelineRouting_FlagInitialization`
+     - `CodecEntitlement_ValidationOverride`: Mem-bypass validator lisensi HEVC pada background rendering engine (`0x1857BBA0` dan `0x1857BCF0`) agar render preview (menekan tombol `Enter`) berjalan lancar tanpa crash atau pop-up.
 3. **JPEG Wrapper (`jpeg`)**
    - File target: `jpeg_wrapper.dll`
    - Fitur:
@@ -27,6 +29,7 @@ Patcher untuk **Adobe Premiere Pro 2026 (v26.x)** pada sistem operasi Windows x6
    - **Windows Defender Firewall Outbound Rules**: Memblokir koneksi internet keluar untuk `Adobe Premiere Pro.exe` dan `PProHeadless.exe` agar background check tidak dapat menghubungi server Adobe.
    - **Hosts Protection**: Memblokir domain verifikasi cloud & telemetri lisensi Adobe (`prod.adobegenuine.com`, `genuine.adobe.com`, `lcs-cpc.adobe.io`, `workflow.licenses.adobe.com`, dll.) secara bersih di `C:\Windows\System32\drivers\etc\hosts`.
    - **License Cache Cleanup**: Menghapus cache token & notifikasi kedaluwarsa lokal (`SLStore`, `OperatingEnvironment`, `OOBE\opgp`, file log) agar dialog peringatan yang tersimpan tidak muncul kembali.
+   - **Codec Directory Provisioning**: Menyiapkan dan menyinkronkan folder codec `C:\Users\Public\Documents\AdobeInstalledCodecsTier2` (`4.0`, `4.3`, `4.3.4`) dan folder root Premiere Pro untuk memastikan ketersediaan library `mc_dec_hevc.dll` dan `mc_enc_hevc.dll`.
 
 ---
 
@@ -61,14 +64,14 @@ Kontrol Menu:
 
 ### 2. Mode Perintah (CLI / Otomatis)
 
-Patch semua target sekaligus mengaktifkan Anti-Popup Protection:
+Patch semua target (Premiere Pro, PProHeadless, JPEG Wrapper, HEVC Codec Bypass, Firewall & Hosts Protection):
 ```powershell
 & .\venv\Scripts\python.exe .\fix\pr_patch.py --targets all
 ```
 
 Patch target spesifik:
 ```powershell
-& .\venv\Scripts\python.exe .\fix\pr_patch.py --targets premiere,jpeg
+& .\venv\Scripts\python.exe .\fix\pr_patch.py --targets premiere,headless
 ```
 
 Konfigurasi perlindungan Anti-Popup saja (Firewall + Hosts + Cache Cleanup):

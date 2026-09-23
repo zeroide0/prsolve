@@ -197,15 +197,32 @@ def _force_jpeg_hwaccel_b(data: bytearray, addr: int, sig: Pattern) -> bytes:
     return bytes(res)
 
 
+def _force_codec_validation_true(data: bytearray, addr: int, sig: Pattern) -> bytes:
+    """Override codec validator functions to return 1 (licensed/enabled).
+
+    Converts:
+      40 53 55 56 57 48 83 EC 48 8B D9 48 8D 2D ...  (push rbx; push rbp; push rsi; ...)
+    To:
+      B0 01 C3 ...  (mov al, 1; ret)
+    Forces HEVC / H.265 and proprietary codec feature gates to report valid license
+    entitlements, preventing background upgrade network checks, preview render freezes,
+    and the Creative Cloud codec modal dialog.
+    """
+    res = bytearray(data[addr : addr + len(sig)])
+    res[0:3] = b'\xB0\x01\xC3'
+    return bytes(res)
+
+
 # --------------------------------------------------------------------- patch tables
 
-PATCHES_PREMIERE_26: "list[tuple[Pattern, Replacement]]" = [
+PATCHES_PREMIERE_26: "list[tuple[Pattern, Replacement, int]]" = [
     (
         [0x0F, 0xB6, 0x80, 0x0C, 0x01, 0x00, 0x00,
          0xC3,
          0x32, 0xC0,
          0xC3],
         _force_profile_validation_true,
+        1,
     ),
     (
         [0x48, 0x8B, 0x08,
@@ -214,6 +231,7 @@ PATCHES_PREMIERE_26: "list[tuple[Pattern, Replacement]]" = [
          0x4C, 0x89, 0x76, 0x10,
          0x4C, 0x89, 0x76, 0x18],
         _force_structural_redirect,
+        1,
     ),
     (
         [0x45, 0x00,
@@ -221,21 +239,29 @@ PATCHES_PREMIERE_26: "list[tuple[Pattern, Replacement]]" = [
          0x49, 0x8B, 0x75, 0x00,
          0x48, 0x81, 0xC6, 0x90],
         _force_secondary_bypass,
+        1,
     ),
     (
         [0x66, 0xC7, 0x83, 0xD0, 0x00, 0x00, 0x00, 0x00, 0x01,
          0x8B, 0x84, 0x24, 0xA8, 0x00, 0x00, 0x00],
         _force_flag_initialization,
+        1,
+    ),
+    (
+        [0x40, 0x53, 0x55, 0x56, 0x57, 0x48, 0x83, 0xEC, 0x48, 0x8B, 0xD9, 0x48, 0x8D, 0x2D],
+        _force_codec_validation_true,
+        2,
     ),
 ]
 
-PATCHES_HEADLESS_26: "list[tuple[Pattern, Replacement]]" = [
+PATCHES_HEADLESS_26: "list[tuple[Pattern, Replacement, int]]" = [
     (
         [0x0F, 0xB6, 0x80, 0x0C, 0x01, 0x00, 0x00,
          0xC3,
          0x32, 0xC0,
          0xC3],
         _force_profile_validation_true,
+        1,
     ),
     (
         [0x45, 0x00,
@@ -243,11 +269,18 @@ PATCHES_HEADLESS_26: "list[tuple[Pattern, Replacement]]" = [
          0x49, 0x8B, 0x75, 0x00,
          0x48, 0x81, 0xC6, 0x90],
         _force_secondary_bypass,
+        1,
     ),
     (
         [0x66, 0xC7, 0x83, 0xD0, 0x00, 0x00, 0x00, 0x00, 0x01,
          0x8B, 0x84, 0x24, 0xA8, 0x00, 0x00, 0x00],
         _force_flag_initialization,
+        1,
+    ),
+    (
+        [0x40, 0x53, 0x55, 0x56, 0x57, 0x48, 0x83, 0xEC, 0x48, 0x8B, 0xD9, 0x48, 0x8D, 0x2D],
+        _force_codec_validation_true,
+        2,
     ),
 ]
 
@@ -373,20 +406,25 @@ def patch(premiere_path: str) -> None:
     patches = _select_patches(version)
     modified = False
 
-    for i, (sig, replacement) in enumerate(patches):
+    for i, patch_def in enumerate(patches):
+        sig = patch_def[0]
+        replacement = patch_def[1]
+        expected_matches = patch_def[2] if len(patch_def) > 2 else 1
+
         occs = find_all(data, sig)
         if not occs:
             logger.info("patch[%d]: no match (already patched or layout differs)", i)
             continue
-        if len(occs) > 1:
-            logger.warning("patch[%d]: matched %d times — skipping", i, len(occs))
+        if len(occs) != expected_matches:
+            logger.warning("patch[%d]: expected %d match(es), found %d — skipping",
+                           i, expected_matches, len(occs))
             continue
-        addr = occs[0]
-        repl_bytes = replacement(data, addr, sig) if callable(replacement) else replacement
-        logger.info("patch[%d]: applying at file offset 0x%08X (%d bytes)",
-                    i, addr, len(repl_bytes))
-        data[addr:addr + len(repl_bytes)] = repl_bytes
-        modified = True
+        for addr in occs:
+            repl_bytes = replacement(data, addr, sig) if callable(replacement) else replacement
+            logger.info("patch[%d]: applying at file offset 0x%08X (%d bytes)",
+                        i, addr, len(repl_bytes))
+            data[addr:addr + len(repl_bytes)] = repl_bytes
+            modified = True
 
     if not modified:
         raise PatchError(
@@ -448,20 +486,25 @@ def patch_headless(headless_path: str) -> None:
         raise PatchError(f"could not read {headless_path}: {e}") from e
 
     modified = False
-    for i, (sig, replacement) in enumerate(PATCHES_HEADLESS_26):
+    for i, patch_def in enumerate(PATCHES_HEADLESS_26):
+        sig = patch_def[0]
+        replacement = patch_def[1]
+        expected_matches = patch_def[2] if len(patch_def) > 2 else 1
+
         occs = find_all(data, sig)
         if not occs:
             logger.info("headless patch[%d]: no match (already patched or differs)", i)
             continue
-        if len(occs) > 1:
-            logger.warning("headless patch[%d]: matched %d times — skipping", i, len(occs))
+        if len(occs) != expected_matches:
+            logger.warning("headless patch[%d]: expected %d match(es), found %d — skipping",
+                           i, expected_matches, len(occs))
             continue
-        addr = occs[0]
-        repl_bytes = replacement(data, addr, sig) if callable(replacement) else replacement
-        logger.info("headless patch[%d]: applying at file offset 0x%08X (%d bytes)",
-                    i, addr, len(repl_bytes))
-        data[addr:addr + len(repl_bytes)] = repl_bytes
-        modified = True
+        for addr in occs:
+            repl_bytes = replacement(data, addr, sig) if callable(replacement) else replacement
+            logger.info("headless patch[%d]: applying at file offset 0x%08X (%d bytes)",
+                        i, addr, len(repl_bytes))
+            data[addr:addr + len(repl_bytes)] = repl_bytes
+            modified = True
 
     if not modified:
         raise PatchError(
@@ -694,6 +737,61 @@ def clear_license_cache() -> None:
     logger.info("license cache cleanup completed (%d items processed)", cleaned)
 
 
+def setup_codec_tier2_directory(premiere_dir: Optional[Path] = None) -> None:
+    """Ensure AdobeInstalledCodecsTier2 directory exists and syncs codec libraries."""
+    tier2_base = Path(r"C:\Users\Public\Documents\AdobeInstalledCodecsTier2")
+    try:
+        tier2_base.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
+
+    known_sources = [
+        tier2_base / "4.0",
+        tier2_base / "4.3",
+        tier2_base / "4.3.4",
+        tier2_base / "2.0",
+        Path(r"C:\Program Files\Adobe\Adobe Premiere Pro 2026"),
+        Path(r"C:\Program Files\Adobe\Adobe Media Encoder 2026"),
+        Path(r"C:\Program Files\Adobe\Adobe After Effects 2026\Support Files"),
+    ]
+    if premiere_dir and Path(premiere_dir).exists():
+        known_sources.insert(0, Path(premiere_dir))
+
+    dec_source = None
+    enc_source = None
+
+    for loc in known_sources:
+        if not dec_source and (loc / "mc_dec_hevc.dll").exists():
+            dec_source = loc / "mc_dec_hevc.dll"
+        if not enc_source and (loc / "mc_enc_hevc.dll").exists():
+            enc_source = loc / "mc_enc_hevc.dll"
+
+    for target_ver in ("4.0", "4.3", "4.3.4"):
+        target_dir = tier2_base / target_ver
+        try:
+            target_dir.mkdir(parents=True, exist_ok=True)
+            if dec_source and not (target_dir / "mc_dec_hevc.dll").exists():
+                shutil.copy(dec_source, target_dir / "mc_dec_hevc.dll")
+                logger.info("provisioned mc_dec_hevc.dll to %s", target_dir)
+            if enc_source and not (target_dir / "mc_enc_hevc.dll").exists():
+                shutil.copy(enc_source, target_dir / "mc_enc_hevc.dll")
+                logger.info("provisioned mc_enc_hevc.dll to %s", target_dir)
+        except OSError as e:
+            logger.debug("could not provision codecs to %s: %s", target_dir, e)
+
+    if premiere_dir and Path(premiere_dir).exists():
+        p_dir = Path(premiere_dir)
+        try:
+            if dec_source and not (p_dir / "mc_dec_hevc.dll").exists():
+                shutil.copy(dec_source, p_dir / "mc_dec_hevc.dll")
+                logger.info("provisioned mc_dec_hevc.dll to app directory: %s", p_dir)
+            if enc_source and not (p_dir / "mc_enc_hevc.dll").exists():
+                shutil.copy(enc_source, p_dir / "mc_enc_hevc.dll")
+                logger.info("provisioned mc_enc_hevc.dll to app directory: %s", p_dir)
+        except OSError:
+            pass
+
+
 # --------------------------------------------------------------------- state detection (no writes)
 
 def state_of_premiere(premiere_path: str) -> str:
@@ -711,7 +809,8 @@ def state_of_premiere(premiere_path: str) -> str:
     with open(premiere_path, "rb") as f:
         data = f.read()
 
-    for sig, _ in patches:
+    for item in patches:
+        sig = item[0]
         if find_all(data, sig):
             return "UNPATCHED"
     return "PATCHED"
@@ -723,7 +822,8 @@ def state_of_headless(headless_path: str) -> str:
         return "MISSING"
     with open(headless_path, "rb") as f:
         data = f.read()
-    for sig, _ in PATCHES_HEADLESS_26:
+    for item in PATCHES_HEADLESS_26:
+        sig = item[0]
         if find_all(data, sig):
             return "UNPATCHED"
     return "PATCHED"
@@ -735,7 +835,8 @@ def state_of_jpeg(dll_path: str) -> str:
         return "MISSING"
     with open(dll_path, "rb") as f:
         data = f.read()
-    for sig, _ in PATCHES_JPEG_26:
+    for item in PATCHES_JPEG_26:
+        sig = item[0]
         if find_all(data, sig):
             return "UNPATCHED"
     return "PATCHED"
@@ -1238,7 +1339,8 @@ def _execute(
             configure_firewall(pr_exe, hl_exe, enable=True)
             configure_hosts(enable=True)
             clear_license_cache()
-            logger.info("anti-popup protection active")
+            setup_codec_tier2_directory(Path(pr_exe).parent if pr_exe else None)
+            logger.info("anti-popup and codec protection active")
         elif action == "restore":
             logger.info("reverting anti-popup protection...")
             configure_firewall(pr_exe, hl_exe, enable=False)
