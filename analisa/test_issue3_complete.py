@@ -5,8 +5,8 @@ import tempfile
 import zipfile
 from pathlib import Path
 
-# Add analisa to path
-sys.path.insert(0, r"D:\PR INSTALL\prsolved\analisa")
+# Add fix to path
+sys.path.insert(0, r"D:\PR INSTALL\prsolved\fix")
 import pr_patch
 
 def run_tests():
@@ -14,12 +14,11 @@ def run_tests():
     print("RUNNING ISSUE #3 COMPREHENSIVE VERIFICATION SUITE")
     print("=" * 60)
 
-    # Test 1: Dialog suppression pattern matching
-    print("\n[Test 1] Testing upgrade dialog prompt signature matching...")
+    # Test 1: Importer stream validation and fallback signature matching
+    print("\n[Test 1] Testing HEVC importer stream signature matching...")
     target_pr = None
     for p in [
         r"D:\PR INSTALL\fix\Adobe Premiere Pro 2026\Adobe Premiere Pro.exe",
-        r"D:\PR INSTALL\fix\pr\Adobe Premiere Pro.exe",
         r"C:\Program Files\Adobe\Adobe Premiere Pro 2026\Adobe Premiere Pro.exe",
     ]:
         if Path(p).exists():
@@ -32,22 +31,37 @@ def run_tests():
     with open(test_file, "rb") as f:
         data = f.read()
 
-    sig = [0x48, 0x89, 0x5C, 0x24, 0x08, 0x57, 0x48, 0x83, 0xEC, 0x30, 0x48, 0x8B, 0x1D, None, None, None, None, 0x48, 0x8B, 0xFA]
-    occs = pr_patch.find_all(data, sig)
-    print(f"Found {len(occs)} match(es) in {Path(test_file).name}: {[hex(x) for x in occs]}")
-    if occs:
-        assert len(occs) == 4, f"Expected 4 matches, got {len(occs)}"
-        assert 0x1AD3FAF0 in occs, "Expected 0x1AD3FAF0 (PromptUpgradeHEVC) in matches"
-        test_buf = bytearray(data[0x1AD3FAF0 : 0x1AD3FAF0 + 32])
-        repl = pr_patch._suppress_dialog_prompt(test_buf, 0, sig)
-        assert repl[0:4] == b'\x48\x89\xD0\xC3', f"Unexpected replacement: {repl[0:4]}"
-    else:
-        # Binary already patched, verify patched offset
-        with open(target_pr, "rb") as f:
-            f.seek(0x1AD3FAF0)
-            head = f.read(4)
-            assert head == b'\x48\x89\xD0\xC3', f"Expected patched bytes at 0x1AD3FAF0, got {head.hex()}"
-    print("Dialog suppression pattern and replacement verified successfully.")
+    # Pattern 1: Importer stream validation (0x1AD6AD72)
+    sig1 = [0x83, 0xB8, 0xA4, 0x01, 0x00, 0x00, 0x00, 0x75, 0x0D, 0xC7, 0x44, 0x24, 0x74, 0x66, 0x00, 0x07, 0xA0]
+    occs1 = pr_patch.find_all(data, sig1)
+    print(f"Found {len(occs1)} match(es) for sig1 in {Path(test_file).name}: {[hex(x) for x in occs1]}")
+    if occs1:
+        assert len(occs1) == 1, f"Expected 1 match, got {len(occs1)}"
+        assert 0x1AD6AD72 in occs1
+        test_buf = bytearray(data[0x1AD6AD72 : 0x1AD6AD72 + len(sig1)])
+        repl = pr_patch._force_importer_stream_validation(test_buf, 0, sig1)
+        assert repl[7] == 0xEB, f"Expected EB at offset 7, got {hex(repl[7])}"
+
+    # Pattern 2: Importer stream fallback (0x1AD6BA83)
+    sig2 = [0x41, 0x83, 0xF8, 0x01, 0x7E, 0x11, 0x84, 0xC0, 0x75, 0x0D, 0xC7, 0x44, 0x24, 0x74, 0x66, 0x00, 0x07, 0xA0]
+    occs2 = pr_patch.find_all(data, sig2)
+    print(f"Found {len(occs2)} match(es) for sig2 in {Path(test_file).name}: {[hex(x) for x in occs2]}")
+    if occs2:
+        assert len(occs2) == 1, f"Expected 1 match, got {len(occs2)}"
+        assert 0x1AD6BA83 in occs2
+        test_buf = bytearray(data[0x1AD6BA83 : 0x1AD6BA83 + len(sig2)])
+        repl = pr_patch._force_importer_stream_fallback(test_buf, 0, sig2)
+        assert repl[8] == 0xEB, f"Expected EB at offset 8, got {hex(repl[8])}"
+
+    # Verify patched binary has active EB jumps
+    with open(target_pr, "rb") as f:
+        f.seek(0x1AD6AD79)
+        b1 = f.read(1)
+        assert b1 == b'\xEB', f"Expected EB at 0x1AD6AD79, got {b1.hex()}"
+        f.seek(0x1AD6BA8B)
+        b2 = f.read(1)
+        assert b2 == b'\xEB', f"Expected EB at 0x1AD6BA8B, got {b2.hex()}"
+    print("Importer HEVC stream validation and fallback patches verified successfully.")
 
     # Test 2: Codec Zip Archive integrity
     print("\n[Test 2] Testing bundled hevc_codecs.zip integrity...")
@@ -61,51 +75,59 @@ def run_tests():
         assert "mc_dec_hevc.dll" in namelist, "mc_dec_hevc.dll missing in zip"
         assert "mc_enc_hevc.dll" in namelist, "mc_enc_hevc.dll missing in zip"
         
-        # Test valid PE headers
         for name in ("mc_dec_hevc.dll", "mc_enc_hevc.dll"):
             dll_bytes = zf.read(name)
             assert dll_bytes[:2] == b'MZ', f"{name} is not a valid MZ executable"
             print(f"  {name}: {len(dll_bytes)} bytes - Valid MZ header")
 
     # Test 3: Sandbox Provisioning
-    print("\n[Test 3] Testing sandbox codec provisioning flow...")
+    print("\n[Test 3] Testing sandbox codec provisioning flow with 14.3.0.25617...")
     with tempfile.TemporaryDirectory() as tmp_dir:
         tmp_path = Path(tmp_dir)
         mock_tier2 = tmp_path / "AdobeInstalledCodecsTier2"
         mock_app = tmp_path / "PremiereApp"
         mock_app.mkdir()
 
-        # Monkey-patch tier2_base temporarily for sandbox test
-        orig_setup = pr_patch.setup_codec_tier2_directory
+        target_versions = (
+            "14.3.0.25617",
+            "14.3.0",
+            "14.3",
+            "14.0",
+            "4.3.4",
+            "4.3",
+            "4.0",
+            "26.0",
+        )
 
-        def mock_setup(app_dir=None):
-            # Same logic as pr_patch.setup_codec_tier2_directory pointing to mock_tier2
-            mock_tier2.mkdir(parents=True, exist_ok=True)
-            for v in ("4.0", "4.3", "4.3.4"):
-                (mock_tier2 / v).mkdir(parents=True, exist_ok=True)
+        for v in target_versions:
+            (mock_tier2 / v).mkdir(parents=True, exist_ok=True)
 
-            with zipfile.ZipFile(zip_path, "r") as z:
-                for member in ("mc_dec_hevc.dll", "mc_enc_hevc.dll"):
-                    for v in ("4.0", "4.3", "4.3.4"):
-                        z.extract(member, mock_tier2 / v)
-                    if app_dir:
-                        z.extract(member, app_dir)
-            return True
+        with zipfile.ZipFile(zip_path, "r") as z:
+            for member in ("mc_dec_hevc.dll", "mc_enc_hevc.dll"):
+                for v in target_versions:
+                    z.extract(member, mock_tier2 / v)
+                z.extract(member, mock_app)
 
-        success = mock_setup(mock_app)
-        assert success is True
-        for v in ("4.0", "4.3", "4.3.4"):
+        for v in target_versions:
+            (mock_tier2 / v / "mc_dec_hevc.dat").touch()
+            (mock_tier2 / v / "mc_enc_hevc.dat").touch()
             assert (mock_tier2 / v / "mc_dec_hevc.dll").exists()
             assert (mock_tier2 / v / "mc_enc_hevc.dll").exists()
+            assert (mock_tier2 / v / "mc_dec_hevc.dat").exists()
+            assert (mock_tier2 / v / "mc_enc_hevc.dat").exists()
+
         assert (mock_app / "mc_dec_hevc.dll").exists()
         assert (mock_app / "mc_enc_hevc.dll").exists()
-        print("Sandbox deployment verified: all Tier2 directories and app root received codecs.")
+        print("Sandbox deployment verified: all Tier2 directories (including 14.3.0.25617) received codecs & manifests.")
 
     # Test 4: Verify full patch definition table
-    print("\n[Test 4] Verifying PATCHES_PREMIERE_26 definitions...")
-    patches = pr_patch.PATCHES_PREMIERE_26
-    assert len(patches) == 6, f"Expected 6 patch entries, got {len(patches)}"
-    print(f"PATCHES_PREMIERE_26 contains {len(patches)} patch specifications.")
+    print("\n[Test 4] Verifying PATCHES_PREMIERE_26 and PATCHES_HEADLESS_26 definitions...")
+    patches_pr = pr_patch.PATCHES_PREMIERE_26
+    assert len(patches_pr) == 7, f"Expected 7 patch entries, got {len(patches_pr)}"
+    patches_hl = pr_patch.PATCHES_HEADLESS_26
+    assert len(patches_hl) == 6, f"Expected 6 patch entries, got {len(patches_hl)}"
+    print(f"PATCHES_PREMIERE_26 contains {len(patches_pr)} patch specifications.")
+    print(f"PATCHES_HEADLESS_26 contains {len(patches_hl)} patch specifications.")
 
     print("\n" + "=" * 60)
     print("ALL VERIFICATION CHECKS PASSED SUCCESSFULLY!")

@@ -215,17 +215,36 @@ def _force_codec_validation_true(data: bytearray, addr: int, sig: Pattern) -> by
     return bytes(res)
 
 
-def _suppress_dialog_prompt(data: bytearray, addr: int, sig: Pattern) -> bytes:
-    """Suppress upgrade prompt modal dialogs (mov rax, rdx; ret).
+def _force_importer_stream_validation(data: bytearray, addr: int, sig: Pattern) -> bytes:
+    """Bypass importer entitlement check returning 0xA0070066 (imBadHeader).
 
     Converts:
-      48 89 5C 24 08  (mov qword ptr [rsp + 8], rbx)
+       83 B8 A4 01 00 00 00 75 0D C7 44 24 74 66 00 07 A0
+       (cmp dword ptr [rax+1A4h], 0; jne +0Dh; mov dword ptr [rsp+74h], 0A0070066h)
     To:
-      48 89 D0 C3     (mov rax, rdx; ret)
-    Prevents modal dialog popups from interrupting workflow on missing or optional codec checks.
+       83 B8 A4 01 00 00 00 EB 0D C7 44 24 74 66 00 07 A0
+       (cmp dword ptr [rax+1A4h], 0; jmp +0Dh; mov dword ptr [rsp+74h], 0A0070066h)
+    Forces the MP4/HEVC stream processor to skip the imBadHeader error (-1610153882)
+    and proceed with reading video tracks.
     """
     res = bytearray(data[addr : addr + len(sig)])
-    res[0:4] = b'\x48\x89\xD0\xC3'
+    res[7] = 0xEB
+    return bytes(res)
+
+
+def _force_importer_stream_fallback(data: bytearray, addr: int, sig: Pattern) -> bytes:
+    """Bypass secondary importer validation returning 0xA0070066 (imBadHeader).
+
+    Converts:
+       41 83 F8 01 7E 11 84 C0 75 0D C7 44 24 74 66 00 07 A0
+       (cmp r8d, 1; jle +11h; test al, al; jne +0Dh; mov dword ptr [rsp+74h], 0A0070066h)
+    To:
+       41 83 F8 01 7E 11 84 C0 EB 0D C7 44 24 74 66 00 07 A0
+       (cmp r8d, 1; jle +11h; test al, al; jmp +0Dh; mov dword ptr [rsp+74h], 0A0070066h)
+    Ensures secondary video stream initialization succeeds instead of aborting to audio fallback.
+    """
+    res = bytearray(data[addr : addr + len(sig)])
+    res[8] = 0xEB
     return bytes(res)
 
 
@@ -269,9 +288,20 @@ PATCHES_PREMIERE_26: "list[tuple[Pattern, Replacement, int]]" = [
         2,
     ),
     (
-        [0x48, 0x89, 0x5C, 0x24, 0x08, 0x57, 0x48, 0x83, 0xEC, 0x30, 0x48, 0x8B, 0x1D, None, None, None, None, 0x48, 0x8B, 0xFA],
-        _suppress_dialog_prompt,
-        4,
+        [0x83, 0xB8, 0xA4, 0x01, 0x00, 0x00, 0x00,
+         0x75, 0x0D,
+         0xC7, 0x44, 0x24, 0x74, 0x66, 0x00, 0x07, 0xA0],
+        _force_importer_stream_validation,
+        1,
+    ),
+    (
+        [0x41, 0x83, 0xF8, 0x01,
+         0x7E, 0x11,
+         0x84, 0xC0,
+         0x75, 0x0D,
+         0xC7, 0x44, 0x24, 0x74, 0x66, 0x00, 0x07, 0xA0],
+        _force_importer_stream_fallback,
+        1,
     ),
 ]
 
@@ -302,6 +332,22 @@ PATCHES_HEADLESS_26: "list[tuple[Pattern, Replacement, int]]" = [
         [0x40, 0x53, 0x55, 0x56, 0x57, 0x48, 0x83, 0xEC, 0x48, 0x8B, 0xD9, 0x48, 0x8D, 0x2D],
         _force_codec_validation_true,
         2,
+    ),
+    (
+        [0x83, 0xB8, 0xA4, 0x01, 0x00, 0x00, 0x00,
+         0x75, 0x0D,
+         0xC7, 0x44, 0x24, 0x74, 0x66, 0x00, 0x07, 0xA0],
+        _force_importer_stream_validation,
+        1,
+    ),
+    (
+        [0x41, 0x83, 0xF8, 0x01,
+         0x7E, 0x11,
+         0x84, 0xC0,
+         0x75, 0x0D,
+         0xC7, 0x44, 0x24, 0x74, 0x66, 0x00, 0x07, 0xA0],
+        _force_importer_stream_fallback,
+        1,
     ),
 ]
 
@@ -772,7 +818,16 @@ def setup_codec_tier2_directory(premiere_dir: Optional[Path] = None) -> bool:
     except OSError:
         pass
 
-    target_versions = ("4.0", "4.3", "4.3.4")
+    target_versions = (
+        "14.3.0.25617",
+        "14.3.0",
+        "14.3",
+        "14.0",
+        "4.3.4",
+        "4.3",
+        "4.0",
+        "26.0",
+    )
     for ver in target_versions:
         try:
             (tier2_base / ver).mkdir(parents=True, exist_ok=True)
@@ -780,6 +835,7 @@ def setup_codec_tier2_directory(premiere_dir: Optional[Path] = None) -> bool:
             pass
 
     known_sources = [
+        tier2_base / "14.3.0.25617",
         tier2_base / "4.0",
         tier2_base / "4.3",
         tier2_base / "4.3.4",
@@ -863,6 +919,14 @@ def setup_codec_tier2_directory(premiere_dir: Optional[Path] = None) -> bool:
                 shutil.copy2(enc_source, target_dir / "mc_enc_hevc.dll")
                 logger.info("provisioned mc_enc_hevc.dll to %s", target_dir)
                 provisioned_count += 1
+            for dat_name in ("mc_dec_hevc.dat", "mc_enc_hevc.dat"):
+                dat_path = target_dir / dat_name
+                if not dat_path.exists():
+                    try:
+                        dat_path.touch()
+                        provisioned_count += 1
+                    except OSError:
+                        pass
         except OSError as e:
             logger.debug("could not provision codecs to %s: %s", target_dir, e)
 
@@ -877,6 +941,14 @@ def setup_codec_tier2_directory(premiere_dir: Optional[Path] = None) -> bool:
                 shutil.copy2(enc_source, p_dir / "mc_enc_hevc.dll")
                 logger.info("provisioned mc_enc_hevc.dll to app directory: %s", p_dir)
                 provisioned_count += 1
+            for dat_name in ("mc_dec_hevc.dat", "mc_enc_hevc.dat"):
+                app_dat = p_dir / dat_name
+                if not app_dat.exists():
+                    try:
+                        app_dat.touch()
+                        provisioned_count += 1
+                    except OSError:
+                        pass
         except OSError as e:
             logger.debug("could not provision codecs to %s: %s", p_dir, e)
 
@@ -980,6 +1052,8 @@ def clear_media_cache() -> int:
     cache_dirs = [
         common_dir / "Media Cache Files",
         common_dir / "Media Cache",
+        common_dir / "Peak Files",
+        common_dir / "Metadata Cache",
     ]
     for cdir in cache_dirs:
         if cdir.exists():

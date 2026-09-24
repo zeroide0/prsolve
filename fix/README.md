@@ -14,7 +14,8 @@ Patcher untuk **Adobe Premiere Pro 2026 (v26.x)** pada sistem operasi Windows x6
      - `PipelineRouting_SecondaryBypass`: Mengubah entitlement active byte flag dari `0` ke `1` (`C6 80 D0 00 00 00 00` -> `C6 80 D0 00 00 00 01`).
      - `PipelineRouting_FlagInitialization`: Menginisialisasi entitlement flag word menjadi `0101h` (`66 C7 83 D0 00 00 00 00 01` -> `66 C7 83 D0 00 00 00 01 01`).
       - `CodecEntitlement_ValidationOverride`: Mengubah entry point validator lisensi codec HEVC / H.265 menjadi `mov al, 1; ret` (`B0 01 C3`) pada kedua fungsi validator internal (`0x1AD423B0` dan `0x1AD42500`). Mencegah sistem freeze dan memvalidasi izin pemutaran codec.
-      - `UpgradeDialog_PromptSuppression`: Mengubah entry point pembangun modal upgrade (`PromptUpgradeHEVC`, `VideoGoURL`, `ProResRawURL`, `ProgressCategory`) menjadi `mov rax, rdx; ret` (`48 89 D0 C3`) pada 4 titik pemanggilan. Menjamin tidak ada lagi dialog pop-up modal upgrade yang muncul saat memutar atau mengimpor file video.
+      - `ImporterStream_EntitlementBypass`: Mengubah percabangan validasi entitlement MP4/HEVC (`83 B8 A4 01 00 00 00 75 0D C7 44 24 74 66 00 07 A0`) dari `jne` (`75 0D`) menjadi unconditional `jmp` (`EB 0D`). Mencegah error `0xA0070066` (`imBadHeader` / `-1610153882`) yang menyebabkan video rekaman HEVC OBS Studio diimpor sebagai Audio Only.
+      - `ImporterStream_FallbackBypass`: Mengubah percabangan validasi sekunder video stream (`41 83 F8 01 7E 11 84 C0 75 0D C7 44 24 74 66 00 07 A0`) dari `jne` (`75 0D`) menjadi `jmp` (`EB 0D`). Menjamin stream video tidak dialihkan (fall back) ke audio-only importer.
 2. **PProHeadless (`headless`)**
    - File target: `PProHeadless.exe` (Background preview & rendering engine)
    - Bypasses:
@@ -22,15 +23,17 @@ Patcher untuk **Adobe Premiere Pro 2026 (v26.x)** pada sistem operasi Windows x6
      - `PipelineRouting_SecondaryBypass`
      - `PipelineRouting_FlagInitialization`
      - `CodecEntitlement_ValidationOverride`: Mem-bypass validator lisensi HEVC pada background rendering engine (`0x1857BBA0` dan `0x1857BCF0`) agar render preview (menekan tombol `Enter`) berjalan lancar tanpa crash atau pop-up.
+     - `ImporterStream_EntitlementBypass`: Mem-bypass error `0xA0070066` pada background engine (`0x18611EF2`).
+     - `ImporterStream_FallbackBypass`: Mem-bypass fallback audio-only pada background engine (`0x18612C03`).
 3. **JPEG Wrapper (`jpeg`)**
    - File target: `jpeg_wrapper.dll`
    - Fitur:
      - `Enable_ExtendedHardwareAcceleration`: Mengaktifkan flag kapabilitas akselerasi hardware pada kedua percabangan (`C7 84 24 34 01 00 00 00 00 00 00` -> `C7 84 24 34 01 00 00 01 00 00 00`).
-4. **HEVC Codec Provisioning & Video Extension (Solusi Blank Preview / Black Screen & Frame Substitution)**
-   - **MainConcept HEVC Decoder & Encoder Bundle**: Menyediakan `mc_dec_hevc.dll` dan `mc_enc_hevc.dll` yang dikemas dalam `hevc_codecs.zip`.
-   - **Multi-Version Tier2 Deployment**: Otomatis mengekstrak dan memasang library ke `C:\Users\Public\Documents\AdobeInstalledCodecsTier2\4.3.4`, `4.3`, `4.0`, serta folder aplikasi Premiere Pro.
+4. **HEVC Codec Provisioning & Video Extension (Solusi Blank Preview / Black Screen & Audio Only)**
+   - **MainConcept HEVC Decoder & Encoder Bundle**: Menyediakan `mc_dec_hevc.dll`, `mc_enc_hevc.dll`, serta manifest `.dat` yang dikemas dalam `hevc_codecs.zip`.
+   - **Multi-Version Tier2 Deployment**: Otomatis mengekstrak dan memasang library ke `C:\Users\Public\Documents\AdobeInstalledCodecsTier2\14.3.0.25617`, `14.3.0`, `14.3`, `14.0`, `4.3.4`, `4.3`, `4.0`, `26.0`, serta folder aplikasi Premiere Pro.
    - **Windows Media Foundation HEVC Video Extension (`Microsoft.HEVCVideoExtension_x64.appx`)**: Otomatis memasang ekstensi codec HEVC resmi Windows untuk `AVDecoderMFT`. Mengatasi error *"Frame substitution recursion attempt aborting"* dan layar hitam pada video rekaman OBS Studio (NVENC / `hvc1`).
-   - **Stale Media Cache Purging**: Membersihkan file cache `.ims` dan `.mcdb` lama di `AppData\Roaming\Adobe\Common\Media Cache Files` agar indeks decode yang sebelumnya rusak / gagal otomatis di-refresh dengan decoder baru.
+   - **Stale Media Cache Purging**: Membersihkan file cache `.ims`, `.mcdb`, `.pek`, dan `.cfa` lama di `AppData\Roaming\Adobe\Common\Media Cache Files`, `Media Cache`, `Peak Files`, dan `Metadata Cache` agar indeks decode yang sebelumnya rusak / diimpor sebagai audio-only otomatis di-refresh dengan stream video baru.
    - **Auto-Download Fallback**: Jika dijalankan mandiri tanpa clone repository, skrip otomatis mengunduh bundle codec dan appx langsung dari repositori dengan retry mechanism.
 5. **Anti-Popup & Genuine Protection (Solusi Issue Pop-up / 5 Hari Tersisa)**
    - **Windows Defender Firewall Outbound Rules**: Memblokir koneksi internet keluar untuk `Adobe Premiere Pro.exe` dan `PProHeadless.exe` agar background check tidak dapat menghubungi server Adobe.
